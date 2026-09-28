@@ -1,11 +1,13 @@
 import express from "express";
 import userRouter from "./routes/userRoutes";
 import bodyParser from "body-parser"
+import cookieParser from "cookie-parser";
 
 const app = express();
 
 app.use(express.json());
 app.use(bodyParser.json())
+app.use(cookieParser())
 app.use(express.urlencoded({ extended: true }))
 app.use("/users", userRouter);
 

@@ -47,5 +47,6 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true
-  }
+  },
+  "include":["src"]
 }

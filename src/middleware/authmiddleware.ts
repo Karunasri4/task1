@@ -1,27 +1,40 @@
 import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken"
+
+import { verifyAccessToken } from "../utils/token";
+
 
 export const verifyToken = (req: Request, res: Response, next: NextFunction): void => {
-    const token = req.headers.authorization
-    const JWT_SECRET = "thisissecret"
-    if (!token) {
-        res.status(401).json("token required")
-        return
-    }
 
-    const actualToken = token.split(" ")[1]
-    const decoded = jwt.verify(actualToken, JWT_SECRET) as {
-        email: string
-        role: string
-    }
-    console.log(decoded)
+    try {
+        const authorization = req.headers.authorization;
+        if (!authorization) {
 
-    if (decoded.role === "instructor") {
-        next()
-    }
-    else {
-        res.status(401).json("you are not authorised")
-    }
+            res.status(401).json({
+                message: "Access token required"
+            });
 
+            return;
+        }
+        const parts = authorization.split(" ");
 
-}
+        if (parts.length !== 2 || parts[0] !== "Bearer") {
+
+            res.status(401).json({
+                message: "Invalid authorization format"
+            })
+            return;
+        }
+        const token = parts[1];
+        const decoded = verifyAccessToken(token);
+        console.log(decoded);
+        next();
+    }
+    catch (error) {
+
+        console.log(error);
+
+        res.status(401).json({
+            message: "Invalid or expired access token"
+        });
+    }
+};

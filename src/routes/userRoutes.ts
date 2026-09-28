@@ -1,16 +1,19 @@
 import express from "express";
-import { register, login, getUsers, getUserByID, updateUserById, deleteUserById } from "../controllers/userController"
+import { register, login,refreshToken,logout, getUsers, getUserByID, updateUserById, deleteUserById } from "../controllers/userController"
 import { verifyToken } from "../middleware/authmiddleware";
-import { deleteUser } from "../models/usermodels";
+import { registerValidation,loginvalidation,updateValidation} from "../validations/userValidation";
+import { validate } from "../middleware/validationMiddleware";
 const router = express.Router()
 
 
-router.post("/register", register)
-router.post("/login", login)
+router.post("/register",registerValidation,validate, register)
+router.post("/login",loginvalidation,validate, login)
+router.post("/refresh",refreshToken)
+router.post("/logout",logout)
 router.get("/", verifyToken, getUsers)
 router.get("/:id", verifyToken, getUserByID)
-router.post("/user/update/:id", verifyToken, updateUserById)
-router.delete("/user/delete/:id", verifyToken, deleteUserById)
+router.put("/:id", verifyToken,updateValidation,validate, updateUserById)
+router.delete("/:id", verifyToken, deleteUserById)
 
 
 export default router

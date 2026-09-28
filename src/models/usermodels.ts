@@ -7,7 +7,7 @@ export const createUser = (
     password: string,
     role: string
 ) => {
-    const query = `
+    const query: string = `
     INSERT INTO userTable(name,email,password,role) 
     VALUES($1,$2,$3,$4) 
     RETURNING *;
@@ -15,17 +15,17 @@ export const createUser = (
     return pool.query(query, [name, email, password, role])
 }
 
-export const getAllUsers = () => {
+export const getAllUsers = ():Promise<QueryResult>=> {
     const query = `SELECT * FROM userTable`
     return pool.query(query)
 }
 
-export const getUserById = (id: number) => {
+export const getUserById = (id: number):Promise<QueryResult> => {
     const query = `SELECT * FROM userTable WHERE id=$1`
     return pool.query(query, [id])
 }
 
-export const getUserByEmail = (email: string) => {
+export const getUserByEmail = (email: string):Promise<QueryResult> => {
     const query = `SELECT * from userTable WHERE email=$1`
     return pool.query(query, [email])
 }
@@ -35,7 +35,7 @@ export const updateUser = (id: number, name: string, email: string, password: st
         const query = `UPDATE userTable
                 SET name=$1, email=$2, password=$3, role=$4
                 WHERE id=$5
-                RETURNING * `
+                RETURNING id,name,email,role `
         return pool.query(query, [name, email, password, role, id])
     }
     catch (err) {
@@ -48,4 +48,24 @@ export const deleteUser = (id: number): Promise<QueryResult> => {
 
     const query = `DELETE FROM userTable WHERE id=$1 RETURNING *`
     return pool.query(query, [id])
+}
+
+//refresh token queries
+export const saveRefreshToken = (userId: number, token: string, expiresAt: Date) => {
+    const query = `INSERT INTO refresh_tokens(user_id,token,expires_at)
+                VALUES($1,$2,$3)
+                RETURNING *`
+    return pool.query(query, [userId, token, expiresAt])
+}
+
+export const getRefreshToken=(token:string)=>{
+    const query=`SELECT * FROM refresh_tokens
+                WHERE token =$1
+                AND expires_at >NOW()`
+    return pool.query(query,[token])
+
+}
+export const deleteRefreshToken=(token:string)=>{
+    const query=`DELETE FROM refresh_tokens WHERE token=$1`
+    return pool.query(query,[token])
 }
