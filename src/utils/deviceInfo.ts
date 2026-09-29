@@ -1,44 +1,54 @@
-import crypto from "crypto"
+import crypto from "crypto";
 
-export const getDeviceInfo=(userAgent:string,ip:string)=>{
-    let operatingSystem="unknown";
-    let deviceName="unknown"
+export const getDeviceInfo = (
+    userAgent: string,
+    ip: string
+) => {
 
-    if(userAgent.includes("windows")){
-        operatingSystem="windows"
-    }
-    else if(userAgent.includes("Mac Os")){
-        operatingSystem="MacOS"
-    }
-    else if(userAgent.includes("Android")){
-        operatingSystem="Android"
-    }
-    else if(userAgent.includes("iPhone")){
-        operatingSystem="iOS"
-    }
-    else if(userAgent.includes("Linux")){
-        operatingSystem="Linux"
-    }
+    const ua = userAgent.toLowerCase();
 
-    if(userAgent.includes("Chrome")){
-        deviceName="Chrome"
+    let operatingSystem = "Unknown";
+    let deviceName = "Unknown";
+
+    // Operating system
+    if (ua.includes("windows")) {
+        operatingSystem = "Windows";
     }
-    else if(userAgent.includes("Firefox")){
-        deviceName="Firefox"
+    else if (ua.includes("android")) {
+        operatingSystem = "Android";
     }
-    else if(userAgent.includes("Safari")){
-        deviceName="Safari"
+    else if (ua.includes("iphone") || ua.includes("ipad")) {
+        operatingSystem = "iOS";
     }
-    else if(userAgent.includes("Edge")){
-        deviceName="Edge"
+    else if (ua.includes("mac os")) {
+        operatingSystem = "MacOS";
+    }
+    else if (ua.includes("linux")) {
+        operatingSystem = "Linux";
     }
 
-    const deviceId=crypto
+    // Browser
+    if (ua.includes("edg")) {
+        deviceName = "Edge";
+    }
+    else if (ua.includes("chrome")) {
+        deviceName = "Chrome";
+    }
+    else if (ua.includes("firefox")) {
+        deviceName = "Firefox";
+    }
+    else if (ua.includes("safari")) {
+        deviceName = "Safari";
+    }
+
+    const deviceId = crypto
         .createHash("sha256")
         .update(userAgent)
-        .digest("hex")
-    
+        .digest("hex");
+
     return {
-        deviceId,operatingSystem,deviceName
-    }
-}
+        deviceId,
+        operatingSystem,
+        deviceName
+    };
+};

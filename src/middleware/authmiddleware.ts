@@ -1,9 +1,9 @@
 import { Request, Response, NextFunction } from "express";
-
 import { verifyAccessToken } from "../utils/token";
+import { getSessionById } from "../models/sessionModels";
 
 
-export const verifyToken = (req: Request, res: Response, next: NextFunction): void => {
+export const verifyToken =async (req: Request, res: Response, next: NextFunction): Promise<void> => {
 
     try {
         const authorization = req.headers.authorization;
@@ -27,6 +27,20 @@ export const verifyToken = (req: Request, res: Response, next: NextFunction): vo
         const token = parts[1];
         const decoded = verifyAccessToken(token);
         console.log(decoded);
+        const session=await getSessionById(decoded.sessionId)
+        if(!session){
+            res.status(401).json({
+                message:"Session not found"
+            })
+            return 
+        }
+        if(session.status===0){
+            res.status(401).json({
+                message:"Session has been logged out"
+            })
+            return
+        }
+        req.user=decoded
         next();
     }
     catch (error) {

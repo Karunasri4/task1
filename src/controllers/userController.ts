@@ -1,5 +1,4 @@
 import { Request, Response } from "express";
-import jwt from "jsonwebtoken";
 import argon2 from "argon2"
 import {
     createUser,
@@ -10,6 +9,8 @@ import {
     deleteUser,
     saveRefreshToken,
     getRefreshToken,
+    getRefreshTokenForLogout,
+    getRefreshTokenBySessionId,
     deleteRefreshToken
 } from "../models/usermodels";
 import {
@@ -18,8 +19,9 @@ import {
     verifyRefreshToken,
     
 } from "../utils/token";
-import { json } from "body-parser";
-import { decode } from "node:punycode";
+import {createSession,getActiveSession,getSessionById,closeSessionById,getUserLoginHistory} from "../models/sessionModels"
+import {getDeviceInfo} from "../utils/deviceInfo"
+
   
 
 export const register = async (req: Request, res: Response): Promise<void> => {
@@ -31,18 +33,18 @@ export const register = async (req: Request, res: Response): Promise<void> => {
             })
         }
         const existingUser = await getUserByEmail(email)
-        if (existingUser.rows.length > 0) {
+        if (existingUser) {
             res.status(409).json({
                 message: "user already exist"
             })
             return
         }
         const hashedPassword = await argon2.hash(password);
-        const result = await createUser(name, email, hashedPassword, role)
+        const user = await createUser(name, email, hashedPassword, role)
 
         res.status(201).json({
             message: "user registered successfully",
-            user: result.rows[0]
+            user
         })
 
     }
@@ -59,38 +61,74 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 
 export const login = async (req: Request, res: Response) => {
     try {
-        const { email, password } = req.body
-        const result = await getUserByEmail(email)
-        if (result.rows.length == 0) {
-            res.status(404).json({
-                message: "User Not fount"
+        const { email, password,forceLogin=false } = req.body
+        const user = await getUserByEmail(email)
+        if (!user) {
+            res.status(401).json({
+                message: "Invalid email or password"
             })
             return
         }
-        const user = result.rows[0]
+        
         const passwordMatch = await argon2.verify(user.password, password)
         if (!passwordMatch) {
             res.status(401).json({
                 message: "Inavalid password"
             })
             return
-
         }
+        const activeSession=await getActiveSession(user.id)
+        //if active session already exist
+        if(activeSession && !forceLogin){
+            res.status(409).json({
+                message:"User is already logged in ",
+                forceLoginRequired:true,
+                activeSession:{
+                    id:activeSession.id,
+                    deviceName:activeSession.device_name,
+                    operatingSystem:activeSession.operating_system,
+                    loginTimestamp:activeSession.login_timestamp
+                }
+            });
+            return
+        }
+        //force login
+        if(activeSession && forceLogin){
+            await closeSessionById(activeSession.id)
+            const oldRefreshToken=await getRefreshTokenBySessionId(activeSession.id)
+            if(oldRefreshToken){
+                await deleteRefreshToken(oldRefreshToken.token)
+            }
+        }
+        const userAgent=req.headers["user-agent"] || "unknown"//here type issue 
+        const deviceIp=req.ip || "unknown"
+
+        const deviceInfo=getDeviceInfo(userAgent,deviceIp)
+        const session=await createSession(user.id,deviceInfo.deviceId,deviceInfo.operatingSystem,deviceInfo.deviceName,deviceIp)
+        if (!session) {
+            res.status(500).json({
+                message: "Failed to create login session"
+            });
+
+            return;
+        }
+
         const payload = {
             id: user.id,
             name:user.name,
             email: user.email,
-            role: user.role
+            role: user.role,
+            sessionId:session.id
         }
         const accessToken = generateAccessToken(payload)
         const refreshToken = generateRefreshToken(payload)
 
 
-        const expiresAt = new Date()
-        expiresAt.setDate(
-            expiresAt.getDate() + 7
+        const refreshExpiresAt = new Date()
+        refreshExpiresAt.setDate(
+            refreshExpiresAt.getDate() + 7
         )
-        await saveRefreshToken(user.id, refreshToken, expiresAt)
+        await saveRefreshToken(user.id,session.id, refreshToken, refreshExpiresAt)
 
         
 
@@ -105,7 +143,14 @@ export const login = async (req: Request, res: Response) => {
                 role: user.role
             },
             "accessToken": accessToken,
-            "refreshToken": refreshToken
+            "refreshToken": refreshToken,
+            session: {
+                id: session.id,
+                loginTimestamp:session.login_timestamp,
+                expiresAt:session.expires_at,
+                status:session.status
+
+            }
         })
 
 
@@ -131,40 +176,88 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
             })
             return
         }
-        const decoded = verifyRefreshToken(refreshToken) as {
-            id: number,
-            name:string,
-            email: string,
-            role: string
-        }
+        const decoded = verifyRefreshToken(refreshToken) 
         console.log("Decoded resfresh token",decoded)
-        const result=await getRefreshToken(refreshToken)
+        const storedToken=await getRefreshToken(refreshToken)
+        console.log(storedToken)
 
-        if(result.rows.length===0){
+
+        if(!storedToken){
             res.status(401).json({
                 message:"Invalid or expired refresh Token"
             })
             return
         }
+
+        if(storedToken.session_id!==decoded.sessionId){
+            res.status(401).json({
+                message:"Refresh token does not belong to this session"
+            })
+            return
+        }
+        //get old session
+        const oldSession=await getSessionById(decoded.sessionId)
+        if(!oldSession){
+            res.status(401).json({
+                message:"Session not found"
+            })
+            return
+        }
+        if(oldSession.status===0){
+            res.status(401).json({
+            message:"Session is already closed"
+            })
+            return
+        }
+        if(new Date(oldSession.expires_at) < new Date()){
+            res.status(401).json({
+                message:"session has expired please login again"
+            })
+            return 
+         }
+
+
+        const closedSession=await closeSessionById(oldSession.id)
+        await deleteRefreshToken(refreshToken)
+        const userAgent=req.headers["user-agent"] || "unknown"
+        const deviceIp=req.ip || "unknown"
+        const deviceInfo=getDeviceInfo(userAgent,deviceIp)
+        //create new session
+        const newSession=await createSession(decoded.id,deviceInfo.deviceId,deviceInfo.operatingSystem,deviceInfo.deviceName,deviceIp)
+        //new payload
         const payload={
             id:decoded.id,
             name:decoded.name,
             email:decoded.email,
-            role:decoded.role
+            role:decoded.role,
+            sessionId:newSession.id
         }
         const newAccessToken=generateAccessToken(payload)
+        const newRefreshToken=generateRefreshToken(payload)
+        const refreshExpiresAt=new Date()
+        refreshExpiresAt.setDate(refreshExpiresAt.getDate()+7)
+        //save NEW refreshtoken
+        await saveRefreshToken(decoded.id,newSession.id,newRefreshToken,refreshExpiresAt)
+
+        
         res.status(200).json({
             "status": "success",
             "success": true,
-            "message": "Account details retrieved successfully.",
-            "data": {
-                id: payload.id,
-                name: payload.name,
-                email: payload.email,
-                role: payload.role
+            "message": "token refreshed successfully.",
+            accessToken:newAccessToken,
+            refreshToken:newRefreshToken,
+            previousSession:{
+                id:closedSession.id,
+                logoutTimestamp:closedSession.logout_timestamp,
+                status:closedSession.status
             },
-            "accessToken": newAccessToken,
-            "refreshToken": refreshToken
+            newSession:{
+                id:newSession.id,
+                loginTimeStamp:newSession.login_timestamp,
+                expiresAt:newSession.expires_at,
+                status:newSession.status
+            }
+            
         })
         
         
@@ -180,14 +273,38 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
 export const logout=async(req:Request,res:Response):Promise<void>=>{
     try{
         const {refreshToken}=req.body//get from request body
+        if(!refreshToken){
+            res.status(400).json({
+                message:"refresh token not found"
+            })
+            return
+        }
+         // We use a separate query here because
+        // even an expired refresh token should allow
+        // us to find the session and close it.
+        const storedToken=await getRefreshTokenForLogout(refreshToken)
+        if(!storedToken){
+            res.status(404).json({
+                message:"refresh token not found"
+            })
+            return
+        }
+        const closedSession=await closeSessionById(storedToken.session_id)
         if(refreshToken){
             await deleteRefreshToken(refreshToken)
         }
-       
+        
         res.status(200).json({
                 "status": "success",  
                 "success": true,  
                 "message": "Logout successfull.",  
+                session: {
+                        id:closedSession?.id,
+                        loginTimestamp:closedSession?.login_timestamp,
+                        logoutTimestamp:closedSession?.logout_timestamp,
+                        expiresAt:closedSession?.expires_at,
+                        status:closedSession?.status
+                    }
                 
             })
 
@@ -204,9 +321,8 @@ export const logout=async(req:Request,res:Response):Promise<void>=>{
 export const getUsers = async (req: Request, res: Response):Promise<void> => {
     try {
         const result = await getAllUsers()
-        console.log(result)
-        console.log(result.rows)
-        res.status(200).json(result.rows)
+       
+        res.status(200).json(result)
     }
     catch (err) {
         console.log(err)
@@ -229,12 +345,12 @@ export const getUserByID = async (req: Request, res: Response) => {
         }
 
         const result = await getUserById(userId)
-        if (result.rows.length === 0) {
+        if (!result) {
             res.status(404).json("user not found")
             return
         }
 
-        res.status(200).json(result.rows[0])
+        res.status(200).json(result)
     }
     catch (err) {
         console.log(err)
@@ -265,14 +381,14 @@ export const updateUserById = async (req: Request, res: Response):Promise<void>=
          }
         const hashedPassword = await argon2.hash(password)
         
-        const result = await updateUser(
+        const user = await updateUser(
             userId,
             name,
             email,
             hashedPassword,
             role
         )
-        if (result.rows.length === 0) {
+        if (!user) {
             res.status(404).json("user not found")
             return
         }
@@ -281,7 +397,7 @@ export const updateUserById = async (req: Request, res: Response):Promise<void>=
                 "status": "success",  
                 "success": true,  
                 "message": "user updated successfully.",  
-                "data": result.rows[0]
+                "data": user
                     })
     }
     catch (err) {
@@ -308,7 +424,7 @@ export const deleteUserById = async (req: Request, res: Response) => {
         }
         const result = await deleteUser(userId)
 
-        if (result.rows.length === 0) {
+        if (result) {
             res.status(404).json("user not found");
             return;
         }
@@ -326,4 +442,26 @@ export const deleteUserById = async (req: Request, res: Response) => {
     }
 }
 
+export const loginHistory=async(req:Request,res:Response):Promise<void>=>{
+    try{
+        const userId=Number(req.params.userId)
+        if(isNaN(userId)){
+            res.status(400).json({
+                message:"Invalid use ID"
+            })
+            return
+        }
+        const history=await getUserLoginHistory(userId)
+        res.status(200).json({
+            message:"Login history fetched successfully",
+            history
+        })
+    }
+    catch(err){
+        console.log(err)
+        res.status(500).json({
+            message:"something went wrong"
+        })
+    }
+}
 

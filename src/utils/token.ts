@@ -2,14 +2,15 @@ import jwt from "jsonwebtoken";
 import dotenv from "dotenv"
 dotenv.config()
 
-interface payLoad {
-    id:number,
-    name:string,
-    email: string,
+interface TokenPayload {
+    id:number
+    name:string
+    email: string
     role: string
+    sessionId:number
 }
 
-export const generateAccessToken = (payload: payLoad): string => {
+export const generateAccessToken = (payload: TokenPayload): string => {
 
     const secret = process.env.JWT_ACCESS_SECRET;
 
@@ -23,7 +24,7 @@ export const generateAccessToken = (payload: payLoad): string => {
 };
 
 
-export const generateRefreshToken = (payload: payLoad): string => {
+export const generateRefreshToken = (payload: TokenPayload): string => {
 
     const secret = process.env.JWT_REFRESH_SECRET;
 
@@ -42,7 +43,7 @@ export const verifyAccessToken = (token: string) => {
         throw new Error("JWT ACCESS SECRET is not defined")
     }
 
-    return jwt.verify(token, secret)
+    return jwt.verify(token, secret) as TokenPayload ;
 }
 
 export const verifyRefreshToken = (token: string) => {
@@ -51,6 +52,6 @@ export const verifyRefreshToken = (token: string) => {
         throw new Error("JWT ACCESS SECRET is not defined")
     }
 
-    return jwt.verify(token, secret)
+    return jwt.verify(token, secret) as TokenPayload
 }
 
