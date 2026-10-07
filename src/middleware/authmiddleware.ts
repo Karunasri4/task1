@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyAccessToken } from "../utils/token";
 import { getSessionById } from "../models/sessionModels";
-
+import {getSessionFromRedis} from "../models/redisModels"
 
 export const verifyToken =async (req: Request, res: Response, next: NextFunction): Promise<void> => {
 
@@ -27,6 +27,15 @@ export const verifyToken =async (req: Request, res: Response, next: NextFunction
         const token = parts[1];
         const decoded = verifyAccessToken(token);
         console.log(decoded);
+
+        const redisSession=await getSessionFromRedis(decoded.sessionId)
+        if(!redisSession){
+            res.status(401).json({
+                message:"session is not active"
+            })
+            return
+        }
+        
         const session=await getSessionById(decoded.sessionId)
         if(!session){
             res.status(401).json({
@@ -40,6 +49,12 @@ export const verifyToken =async (req: Request, res: Response, next: NextFunction
             })
             return
         }
+        if(new Date(session.expires_at)<=new Date()){
+            res.status(401).json({
+                message:"Session has expired"
+            })
+        }
+
         req.user=decoded
         next();
     }

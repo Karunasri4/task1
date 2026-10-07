@@ -92,3 +92,113 @@ export const updateValidation=[
         .withMessage("Invalid role")
 
 ]
+
+// ======================================================
+// FORGOT PASSWORD
+// ======================================================
+
+export const forgotPasswordValidation = [
+
+    body("email")
+        .trim()
+        .notEmpty()
+        .withMessage(
+            "Email is required"
+        )
+        .isEmail()
+        .withMessage(
+            "Enter a valid email"
+        )
+];
+
+
+// ======================================================
+// RESET PASSWORD
+// ======================================================
+
+export const resetPasswordValidation = [
+
+    body("email")
+        .trim()
+        .notEmpty()
+        .withMessage(
+            "Email is required"
+        )
+        .isEmail()
+        .withMessage(
+            "Enter a valid email"
+        ),
+
+    body("resetToken")
+        .trim()
+        .notEmpty()
+        .withMessage(
+            "Reset token is required"
+        ),
+
+    body("newPassword")
+        .notEmpty()
+        .withMessage(
+            "New password is required"
+        )
+        .isLength({ min: 8 })
+        .withMessage(
+            "Password must be at least 8 characters"
+        )
+        .matches(/[A-Z]/)
+        .withMessage(
+            "Password must contain at least one uppercase letter"
+        )
+        .matches(/[a-z]/)
+        .withMessage(
+            "Password must contain at least one lowercase letter"
+        )
+        .matches(/[0-9]/)
+        .withMessage(
+            "Password must contain at least one number"
+        )
+        .matches(/[^A-Za-z0-9]/)
+        .withMessage(
+            "Password must contain at least one special character"
+        )
+];
+
+
+// ======================================================
+// UPDATE PASSWORD
+// ======================================================
+
+export const updatePasswordValidation = [
+
+    body("currentPassword")
+        .notEmpty()
+        .withMessage(
+            "Current password is required"
+        ),
+
+    body("newPassword")
+        .notEmpty()
+        .withMessage(
+            "New password is required"
+        )
+        .isLength({ min: 8 })
+        .withMessage(
+            "Password must be at least 8 characters"
+        )
+        .matches(/[A-Z]/)
+        .withMessage(
+            "Password must contain at least one uppercase letter"
+        )
+        .matches(/[a-z]/)
+        .withMessage(
+            "Password must contain at least one lowercase letter"
+        )
+        .matches(/[0-9]/)
+        .withMessage(
+            "Password must contain at least one number"
+        )
+        .matches(/[^A-Za-z0-9]/)
+        .withMessage(
+            "Password must contain at least one special character"
+        )
+];

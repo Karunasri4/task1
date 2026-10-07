@@ -1,11 +1,13 @@
 import { Request, Response } from "express";
 import argon2 from "argon2"
+import crypto from "crypto"
 import {
     createUser,
     getAllUsers,
     getUserById,
     getUserByEmail,
     updateUser,
+    updateUserPassword,
     deleteUser,
     saveRefreshToken,
     getRefreshToken,
@@ -16,13 +18,16 @@ import {
 import {
     generateAccessToken,
     generateRefreshToken,
-    verifyRefreshToken,
+    verifyRefreshToken
     
 } from "../utils/token";
 import {createSession,getActiveSession,getSessionById,closeSessionById,getUserLoginHistory} from "../models/sessionModels"
 import {getDeviceInfo} from "../utils/deviceInfo"
-
-  
+import { selectUnknownFields } from "express-validator/lib/field-selection";
+import { saveSessionToRedis,getSessionFromRedis,deleteSessionFronRedis,
+        saveUserToRedis,getAllUsersFromRedis,getUserByIdFromRedis,deleteUserFromRedis,
+        savePasswordResetToken,getPasswordRestToken,deletePasswordResetToken       
+ } from "../models/redisModels";
 
 export const register = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -59,9 +64,9 @@ export const register = async (req: Request, res: Response): Promise<void> => {
     }
 }
 
-export const login = async (req: Request, res: Response) => {
+export const login = async (req: Request, res: Response):Promise<void> => {
     try {
-        const { email, password,forceLogin=false } = req.body
+        const { email, password } = req.body
         const user = await getUserByEmail(email)
         if (!user) {
             res.status(401).json({
@@ -79,7 +84,7 @@ export const login = async (req: Request, res: Response) => {
         }
         const activeSession=await getActiveSession(user.id)
         //if active session already exist
-        if(activeSession && !forceLogin){
+        if(activeSession){
             res.status(409).json({
                 message:"User is already logged in ",
                 forceLoginRequired:true,
@@ -92,15 +97,9 @@ export const login = async (req: Request, res: Response) => {
             });
             return
         }
-        //force login
-        if(activeSession && forceLogin){
-            await closeSessionById(activeSession.id)
-            const oldRefreshToken=await getRefreshTokenBySessionId(activeSession.id)
-            if(oldRefreshToken){
-                await deleteRefreshToken(oldRefreshToken.token)
-            }
-        }
-        const userAgent=req.headers["user-agent"] || "unknown"//here type issue 
+        
+        
+        const userAgent=req.headers["user-agent"] || "unknown" 
         const deviceIp=req.ip || "unknown"
 
         const deviceInfo=getDeviceInfo(userAgent,deviceIp)
@@ -129,8 +128,13 @@ export const login = async (req: Request, res: Response) => {
             refreshExpiresAt.getDate() + 7
         )
         await saveRefreshToken(user.id,session.id, refreshToken, refreshExpiresAt)
-
-        
+        await saveSessionToRedis(session.id,user.id,session.expires_at)  
+        await saveUserToRedis({
+            id:user.id,
+            name:user.name,
+            email:user.email,
+            role:user.role
+        })      
 
         res.status(200).json({
             "status": "success",
@@ -166,6 +170,92 @@ export const login = async (req: Request, res: Response) => {
     }
 
 }
+
+export const forceLogin=async(req:Request,res:Response):Promise<void>=>{
+    try{
+        const {email,password}=req.body
+        const user=await getUserByEmail(email)
+        if(!user){
+            res.status(401).json({
+                message:"Invalid email or Password"
+            })
+            return
+        }
+        const passwordMatch=await argon2.verify(user.password,password)
+        if(!passwordMatch){
+            res.status(401).json({
+                message:"Invalid password"
+            })
+            return
+        }
+        const activeSession=await getActiveSession(user.id)
+        if(activeSession){
+            await closeSessionById(activeSession.id)
+            const oldRefreshToken=await getRefreshTokenBySessionId(activeSession.id)
+            if(oldRefreshToken){
+                await deleteRefreshToken(oldRefreshToken.token)
+            }
+        }
+        const userAgent=req.headers["user-agent"] || "unknown"
+        const deviceIp=req.ip || "unknown"
+        const deviceInfo=await getDeviceInfo(userAgent,deviceIp)
+        const newSession=await createSession(user.id,deviceInfo.deviceId,deviceInfo.operatingSystem,deviceInfo.deviceName,deviceIp)
+        if (!newSession) {
+            res.status(500).json({
+                message: "Failed to create login session"
+            });
+            return;
+        }
+        const payLoad={
+            id:user.id,
+            name:user.name,
+            email:user.email,
+            role:user.role,
+            sessionId:newSession.id
+        }
+        const newAccessToken=await generateAccessToken(payLoad);
+        const newRefreshToken=await generateRefreshToken(payLoad)
+        const refreshExpiresAt = new Date()
+        refreshExpiresAt.setDate(
+            refreshExpiresAt.getDate() + 7
+        )
+        await saveRefreshToken(user.id,newSession.id, newRefreshToken, refreshExpiresAt)
+        await saveSessionToRedis(newSession.id,user.id,newSession.expires_at)
+        await saveUserToRedis({id:user.id,name:user.name,email:user.email,role:user.role})
+        res.status(200).json({
+            "status": "success",
+            "success": true,
+            "message": "Account details retrieved successfully.",
+            "data": {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: user.role
+            },
+            "accessToken": newAccessToken,
+            "refreshToken": newRefreshToken,
+            session: {
+                id: newSession.id,
+                loginTimestamp:newSession.login_timestamp,
+                expiresAt:newSession.expires_at,
+                status:newSession.status
+
+            }
+        })
+       
+
+        
+    }
+    catch(err){
+        console.log(err)
+        res.status(500).json({
+            status:"failed",
+            success:false,
+            message:"something went wrong"
+        })
+    }
+    
+}
 //REFRESH ACCESS TOKEN
 export const refreshToken = async (req: Request, res: Response):Promise<void> => {
     try {
@@ -196,6 +286,14 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
             return
         }
         //get old session
+        //check in redis session
+        const redisSession=await getSessionFromRedis(decoded.sessionId)
+        if(!redisSession){
+            res.status(401).json({
+                message:"Session is no longer active"
+            })
+            return
+        }
         const oldSession=await getSessionById(decoded.sessionId)
         if(!oldSession){
             res.status(401).json({
@@ -218,6 +316,7 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
 
 
         const closedSession=await closeSessionById(oldSession.id)
+        await deleteSessionFronRedis(oldSession.id)
         await deleteRefreshToken(refreshToken)
         const userAgent=req.headers["user-agent"] || "unknown"
         const deviceIp=req.ip || "unknown"
@@ -238,6 +337,7 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
         refreshExpiresAt.setDate(refreshExpiresAt.getDate()+7)
         //save NEW refreshtoken
         await saveRefreshToken(decoded.id,newSession.id,newRefreshToken,refreshExpiresAt)
+        await saveSessionToRedis(newSession.id,decoded.id,newSession.expires_at)
 
         
         res.status(200).json({
@@ -290,6 +390,7 @@ export const logout=async(req:Request,res:Response):Promise<void>=>{
             return
         }
         const closedSession=await closeSessionById(storedToken.session_id)
+        await deleteSessionFronRedis(storedToken.session_id)
         if(refreshToken){
             await deleteRefreshToken(refreshToken)
         }
@@ -320,7 +421,19 @@ export const logout=async(req:Request,res:Response):Promise<void>=>{
 }
 export const getUsers = async (req: Request, res: Response):Promise<void> => {
     try {
+        //check in redis
+        const redisUsers=await getAllUsersFromRedis()
+        if(redisUsers){
+            console.log("users fetched from redis")
+            res.status(200).json(redisUsers)
+            return
+        }
+        
+
         const result = await getAllUsers()
+        for(const user of result){
+            await saveUserToRedis(user)
+        }
        
         res.status(200).json(result)
     }
@@ -343,12 +456,19 @@ export const getUserByID = async (req: Request, res: Response) => {
             })
             return
         }
+        const redisUser=await getUserByIdFromRedis(userId)
+        if(redisUser){
+            console.log("retrived user from redis")
+            res.status(200).json(redisUser)
+            return
+        }
 
         const result = await getUserById(userId)
         if (!result) {
             res.status(404).json("user not found")
             return
         }
+        await saveUserToRedis(result)
 
         res.status(200).json(result)
     }
@@ -392,6 +512,13 @@ export const updateUserById = async (req: Request, res: Response):Promise<void>=
             res.status(404).json("user not found")
             return
         }
+        try {
+            await saveUserToRedis(user);
+            console.log("User cache updated in Redis");
+        } 
+        catch (redisError) {
+            console.log("Redis cache update failed:", redisError);
+        }
 
         res.status(200).json({
                 "status": "success",  
@@ -428,6 +555,7 @@ export const deleteUserById = async (req: Request, res: Response) => {
             res.status(404).json("user not found");
             return;
         }
+        await deleteUserFromRedis(result)
 
 
         res.status(200).json("user deleted successfully");
@@ -465,3 +593,128 @@ export const loginHistory=async(req:Request,res:Response):Promise<void>=>{
     }
 }
 
+export const forgotPassword=async(req:Request,res:Response):Promise<void>=>{
+    try{
+        const {email}=req.body
+        const user=await getUserByEmail(email)
+        if(!user){
+            res.status.json({
+                message:"user not found"
+            })
+            return
+        }
+        //generate tmporary token
+        const resetToken=crypto.randomBytes(32).toString("hex")
+        //store ONLY temporary token in redis
+        //TTL=15 minutes
+        await savePasswordResetToken(user.id,resetToken)
+        res.status(200).json({
+            message:"password reset token generated",
+            "resetToken": resetToken
+        })
+
+    }
+    catch(err){
+        console.log(err)
+        res.status(500).json({
+            message:"something went wrong"
+        })
+    }
+}
+
+export const resetPassword=async(req:Request,res:Response):Promise<void>=>{
+    try{
+        const {email,resetToken,newPassword} =req.body
+        const user=await getUserByEmail(email)
+        if(!user){
+            res.status(400).json({
+                message:"invalid reset request"
+            })
+            return
+        }
+        //get temporary token from redis
+        const storedToken=await getPasswordRestToken(user.id)
+        if(!storedToken){
+            res.status(400).json({
+                message:"reset token is invalid or expired"
+            })
+            return
+        }
+        if(storedToken!==resetToken){
+            res.status(400).json({
+                message:"invalid reset token"
+            })
+            return
+        }
+        const hashedPassword=await argon2.hash(newPassword)
+        const updatedUser=await updateUserPassword(user.id,hashedPassword)
+        if(!updateUser){
+            res.status(404).json({
+                message:"user not found"
+            })
+            return
+        }
+        await deletePasswordResetToken(user.id)
+        await saveUserToRedis(updatedUser)
+
+        res.status(200).json({
+            message:"password reset successfully"
+        })
+    }
+    catch(err){
+        console.log(err)
+        res.status(500).json({
+            message:"something went wrong"
+        })
+    }
+
+}
+
+export const updatedPassword=async(req:Request,res:Response):Promise<void>=>{
+    try{
+        const userId=req.user?.id
+        if(!userId){
+            res.status(401).json({
+                message:"unauthorized"
+            })
+            return
+        }
+        const {currentPassword,newPassword}=req.body
+        const user=await getUserByEmail(req.user!.email)
+        if(!user){
+            res.status(404).json({
+                message:"user not found"
+            })
+            return 
+        }
+        const passwordMatch=await argon2.verify(user.password,currentPassword)
+        if(!passwordMatch){
+            res.status(401).json({
+                message:"current password is incorrect"
+            })
+            return 
+        }
+        const hashedPassword=await argon2.hash(newPassword)
+
+        const updatedUser=await updateUserPassword(userId,hashedPassword)
+        if(!updatedUser){
+            res.status(404).json({
+                message:"user not found"
+            })
+            return
+        }
+         // Redis only gets safe fields
+        // No password is stored
+        await saveUserToRedis(updatedUser)
+        res.status(200).json({
+            message:"Password updated successefully"
+        })
+    }
+    catch(err){
+        console.log(err)
+        res.status(500).json({
+            message:
+                "Something went wrong."
+        });
+    }
+}
