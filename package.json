@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "tsx watch src/app.ts",
     "build": "tsc",
-    "start": "node dist/app.js"
+    "start": "node dist/app.js",
+    "worker":"tsx src/workers/email.worker.ts",
+    "worker:prod": "node dist/workers/email.worker.js"
   },
   "keywords": [],
   "author": "",
@@ -16,14 +18,19 @@
   "dependencies": {
     "argon2": "^0.45.1",
     "body-parser": "^2.3.0",
+    "bullmq": "^6.3.11",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^18.0.3",
     "express": "^5.2.1",
     "express-validator": "^7.3.2",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
-    "pg": "^8.23.0",
-    "redis": "^6.3.0"
+    "nodemailer": "^10.0.16",
+    "pg": "^8.23.1",
+    "pg-hstore": "^2.3.4",
+    "redis": "^6.3.0",
+    "sequelize": "^6.37.8"
   },
   "devDependencies": {
     "@types/body-parser": "^1.19.6",
@@ -32,7 +39,9 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.6.3",
+    "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.23.1",
+    "@types/sequelize": "^4.28.20",
     "nodemon": "^3.1.14",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"

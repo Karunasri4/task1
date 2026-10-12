@@ -1,105 +1,168 @@
-import pool from "../config/db"
+import { DataTypes,Model,Optional } from "sequelize";
+import sequelize from "../config/db";
+import { BlockList } from "node:net";
 
-export const createUser =async  (
-    name: string,
-    email: string,
-    password: string,
-    role: string
+interface UserAttributes{
+    id:number;
+    name:string;
+    email:string;
+    password:string;
+    role:string;
+    email_verified:boolean;
+}
+interface UserCreationAttributes extends Optional<UserAttributes,"id" | "email_verified">{}
+class User extends Model<UserAttributes,UserCreationAttributes> implements UserAttributes{
+    declare id:number;
+    declare name:string;
+    declare email:string;
+    declare password: string;
+    declare role: string;
+    declare email_verified:boolean;
+}
+User.init(
+    {
+        id:{
+            type:DataTypes.INTEGER,
+            autoIncrement:true,
+            primaryKey:true
+        },
+        name:{
+            type:DataTypes.STRING,
+            allowNull:false,
+        },
+        email:{
+            type:DataTypes.STRING,
+            allowNull:false,
+            unique:true
+        },
+        password:{
+            type:DataTypes.STRING,
+            allowNull:false
+        },
+        role:{
+            type:DataTypes.STRING,
+            allowNull:false
+        },
+        email_verified:{
+            type:DataTypes.BOOLEAN,
+            allowNull:false,
+            defaultValue:false
+        }
+    },
+    {
+        sequelize,
+        timestamps:false,
+        modelName:"User",
+        tableName:"usertable"
+    }
+
+)
+const safeUser = (user: User) => ({
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    email_verified: user.email_verified
+});
+
+export const createUser=async(
+    name:string,
+    email:string,
+    password:string,
+    role:string,
     
-) => {
-    const query: string = `
-    INSERT INTO userTable(name,email,password,role) 
-    VALUES($1,$2,$3,$4) 
-    RETURNING id, name, email, role;
-    `;
-    const result = await pool.query(query, [name, email, password, role])
-    return result.rows[0]
+)=>{
+    const user=await User.create({
+        name,
+        email,
+        password,
+        role
+    })
+    return safeUser(user)
 }
 
-export const getAllUsers =async ()=> {
-    const query = `SELECT id,name,email,role FROM userTable`
-    const result= await pool.query(query)
-    return result.rows
+export const getAllUsers=async()=>{
+    return User.findAll({
+        attributes:["id","name","email","role"],
+        raw:true,
+    })
+}
+export const getUserById=async(id:number)=>{
+    return await User.findOne({
+        where:{id},
+        attributes:{
+            exclude:["password"]
+        },
+        raw:true,
+    })
 }
 
-export const getUserById =async (id: number)=> {
-    const query = `SELECT id,name,email,role FROM userTable WHERE id=$1`
-    const result= await pool.query(query, [id])
-    return result.rows[0]
+export const getUserByEmail=async(email:string)=>{
+    return await User.findOne({
+        where:{email},
+    })
 }
 
-export const getUserByEmail = async(email: string) => {
-    const query = `SELECT * from userTable WHERE email=$1`
-    const result= await pool.query(query, [email])
-    return result.rows[0]
-}
-
-export const updateUser =async (id: number, name: string, email: string, password: string, role: string) => {
-    
-    const query = `UPDATE userTable
-            SET name=$1, email=$2, password=$3, role=$4
-            WHERE id=$5
-            RETURNING id,name,email,role `
-    const result= await pool.query(query, [name, email, password, role, id])
-    return result.rows[0]
-    
-
-}
-export const deleteUser = async(id: number) => {
-
-    const query = `DELETE FROM userTable WHERE id=$1 RETURNING *`
-    const result=await pool.query(query, [id])
-    return result.rows[0]
-}
-
-//refresh token queries
-export const saveRefreshToken = async (userId: number,sessionId:number, token: string, expiresAt: Date) => {
-    const query = `INSERT INTO refresh_tokens(user_id,session_id,token,expires_at)
-                VALUES($1,$2,$3,$4)
-                RETURNING *`
-    const result=await pool.query(query, [userId,sessionId, token, expiresAt])
-    return result.rows[0]
-}
-
-export const getRefreshToken=async(token:string)=>{
-    const query=`SELECT * FROM refresh_tokens
-                WHERE token =$1
-                AND expires_at > NOW()`
-    const result= await pool.query(query,[token])
-    return result.rows[0]
-
-}
-
-
-// Used for logout.
-// We don't check expiry here because we still want to
-// find the session and close it.
-export const getRefreshTokenForLogout = async (
-    token: string
-) => {
-
-    const query = `
-        SELECT *
-        FROM refresh_tokens
-        WHERE token = $1
-    `;
-
-    const result = await pool.query(
-        query,
-        [token]
-    );
-
-    return result.rows[0];
-};
-export const getRefreshTokenBySessionId=async(sessionId:number)=>{
-    const query:string=`SELECT * FROM refresh_tokens
-    WHERE session_id=$1 
-    LIMIT 1`
-    const result=await pool.query(query,[sessionId])
-    return result.rows[0]
-}
-export const deleteRefreshToken=async(token:string)=>{
-    const query=`DELETE FROM refresh_tokens WHERE token=$1`
-    const result= await pool.query(query,[token])
+export const updateUser=async(id:number,name:string,email:string,role:string)=>{
+    const user=await User.findByPk(id)
+    if(!user){
+        return null;
+    }
+    const emailChanged=user.email.toLowerCase()!==email.toLowerCase() 
+    await user.update({name,email,role,...(emailChanged ? {email_verified:false}:{})})
+    return safeUser(user)
     
 }
+export const updateUserPassword=async(id:number,password:string)=>{
+    const user=await User.findByPk(id);
+    if(!user){
+        return null
+    }
+    await user.update({password})
+    return {
+        id:user.id,
+        name:user.name,
+        email:user.email,
+        role:user.role
+    }
+}
+
+export const deleteUser=async(id:number)=>{
+    const user=await User.findByPk(id)
+    if(!user){
+        return null
+    }
+    const result=safeUser(user)
+    await user.destroy()
+    return result
+}
+export const markEmailVerified=async(userId:number):Promise<boolean>=>{
+    const user=await User.findByPk(userId)
+    if(!user){
+        return false
+    }
+    await user.update({
+        email_verified:true
+    })
+    return true
+}
+
+export default User
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

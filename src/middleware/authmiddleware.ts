@@ -8,7 +8,6 @@ export const verifyToken =async (req: Request, res: Response, next: NextFunction
     try {
         const authorization = req.headers.authorization;
         if (!authorization) {
-
             res.status(401).json({
                 message: "Access token required"
             });
@@ -38,6 +37,7 @@ export const verifyToken =async (req: Request, res: Response, next: NextFunction
         
         const session=await getSessionById(decoded.sessionId)
         if(!session){
+            console.log("session missing in database",decoded.sessionId)
             res.status(401).json({
                 message:"Session not found"
             })
@@ -53,6 +53,7 @@ export const verifyToken =async (req: Request, res: Response, next: NextFunction
             res.status(401).json({
                 message:"Session has expired"
             })
+            return
         }
 
         req.user=decoded
@@ -60,7 +61,7 @@ export const verifyToken =async (req: Request, res: Response, next: NextFunction
     }
     catch (error) {
 
-        console.log(error);
+        console.log("Authentication error",error);
 
         res.status(401).json({
             message: "Invalid or expired access token"

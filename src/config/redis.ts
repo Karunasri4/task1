@@ -4,7 +4,7 @@ dotenv.config()
 
 const redisClient=createClient({
     socket:{
-        host:process.env.REDIS_HOST ,
+        host:process.env.REDIS_HOST!,
         port:Number(process.env.REDIS_PORT)
     }
 })

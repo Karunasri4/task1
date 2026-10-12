@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
-import argon2 from "argon2"
-import crypto from "crypto"
+import { addEmailJob } from "../queues/emailQueue";
+import argon2 from "argon2";
+import crypto from "crypto";
 import {
     createUser,
     getAllUsers,
@@ -8,35 +9,62 @@ import {
     getUserByEmail,
     updateUser,
     updateUserPassword,
-    deleteUser,
+    deleteUser
+} from "../models/usermodels";
+import {
     saveRefreshToken,
     getRefreshToken,
     getRefreshTokenForLogout,
     getRefreshTokenBySessionId,
     deleteRefreshToken
-} from "../models/usermodels";
+} from "../models/refreshTokenModels"
 import {
     generateAccessToken,
     generateRefreshToken,
     verifyRefreshToken
-    
 } from "../utils/token";
 import {createSession,getActiveSession,getSessionById,closeSessionById,getUserLoginHistory} from "../models/sessionModels"
 import {getDeviceInfo} from "../utils/deviceInfo"
-import { selectUnknownFields } from "express-validator/lib/field-selection";
 import { saveSessionToRedis,getSessionFromRedis,deleteSessionFronRedis,
         saveUserToRedis,getAllUsersFromRedis,getUserByIdFromRedis,deleteUserFromRedis,
-        savePasswordResetToken,getPasswordRestToken,deletePasswordResetToken       
- } from "../models/redisModels";
+        savePasswordResetToken,getPasswordRestToken,deletePasswordResetToken,
+        hashEmailToken,saveEmailVerificationToken,getEmailVerificationUserId,deleteEmailVerificationToken
+} from "../models/redisModels";
+import { markEmailVerified } from "../models/usermodels";
+
+const normalizeEmail = (email: unknown): string =>
+    typeof email === "string" ? email.trim().toLowerCase() : "";
+
+const emailVerificationUrl = (token: string): string => {
+    const baseUrl = process.env.EMAIL_VERIFICATION_URL;
+    if (!baseUrl) throw new Error("EMAIL_VERIFICATION_URL is not configured");
+    return `${baseUrl}?token=${encodeURIComponent(token)}`;
+};
+
+const queueVerificationEmail = async (
+    user: { id: number; name: string; email: string }
+): Promise<void> => {
+    const token = crypto.randomBytes(32).toString("hex");
+    await saveEmailVerificationToken(hashEmailToken(token), user.id);
+    await addEmailJob({
+        type: "verify-email",
+        to: user.email,
+        name: user.name,
+        url: emailVerificationUrl(token)
+    });
+};
 
 export const register = async (req: Request, res: Response): Promise<void> => {
     try {
-        const { name, email, password, role } = req.body
+        const { name, password, role } = req.body
+        const email=normalizeEmail(req.body.email)
         if (!name || !email || !password || !role) {
             res.status(400).json({
                 message: "All fields are required"
             })
+            return
         }
+        
         const existingUser = await getUserByEmail(email)
         if (existingUser) {
             res.status(409).json({
@@ -46,12 +74,11 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         }
         const hashedPassword = await argon2.hash(password);
         const user = await createUser(name, email, hashedPassword, role)
-
+        await queueVerificationEmail(user);
         res.status(201).json({
-            message: "user registered successfully",
+            message: "Registration successful. Check your email to verify your account.",
             user
-        })
-
+        });
     }
     catch (err) {
         console.log(err)
@@ -63,26 +90,114 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 
     }
 }
+export const verifyEmail = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const token = req.query.token;
+        if (typeof token !== "string" || !/^[a-f0-9]{64}$/i.test(token)) {
+            res.status(400).json({ message: "Invalid verification token" });
+            return;
+        }
+
+        const tokenHash = hashEmailToken(token);
+        const userId = await getEmailVerificationUserId(tokenHash);
+
+        if (!userId) {
+            res.status(400).json({ message: "Verification token is invalid or expired" });
+            return;
+        }
+
+        const verified = await markEmailVerified(userId);
+        if (!verified) {
+            res.status(404).json({ message: "User not found" });
+            return;
+        }
+
+        await deleteEmailVerificationToken(tokenHash);
+        res.status(200).json({
+             message: "Email verified successfully. You can now log in."
+        });
+    } 
+    catch (error) {
+        console.error("Email verification error:", error);
+        res.status(500).json({ 
+            message: "Email verification failed" 
+        });
+    }
+};
+
+
+const checkCredentials = async (email: string, password: string) => {
+    const user = await getUserByEmail(email);
+    if (!user) return { user: null, error: "invalid" as const };
+
+    if (!user.email_verified){
+        return { user, error: "unverified" as const };
+    } 
+
+    const passwordMatch = await argon2.verify(user.password, password);
+    if (!passwordMatch) return { user: null, error: "invalid" as const };
+
+    return { user, error: null };
+};
+const createLoginResponse = async (
+    req: Request,
+    user: NonNullable<Awaited<ReturnType<typeof getUserByEmail>>>
+) => {
+    const userAgent = req.headers["user-agent"] || "unknown";
+    const deviceIp = req.ip || "unknown";
+    const deviceInfo = getDeviceInfo(userAgent, deviceIp);
+
+    const session = await createSession(
+        user.id,
+        deviceInfo.deviceId,
+        deviceInfo.operatingSystem,
+        deviceInfo.deviceName,
+        deviceIp
+    );
+
+    const payload = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        sessionId: session.id
+    };
+
+    const accessToken = generateAccessToken(payload);
+    const refreshToken = generateRefreshToken(payload);
+    const refreshExpiresAt = new Date();
+    refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 7);
+
+    await saveRefreshToken(user.id, session.id, refreshToken, refreshExpiresAt);
+    await saveSessionToRedis(session.id, user.id, session.expires_at);
+    await saveUserToRedis({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        email_verified: user.email_verified
+    });
+
+    return { session, accessToken, refreshToken };
+};
 
 export const login = async (req: Request, res: Response):Promise<void> => {
     try {
-        const { email, password } = req.body
-        const user = await getUserByEmail(email)
-        if (!user) {
-            res.status(401).json({
-                message: "Invalid email or password"
-            })
-            return
+        const email=normalizeEmail(req.body.email)
+        const password=req.body.password as string
+        const result=await checkCredentials(email,password)
+       if(result.error === "unverified"){
+        res.status(403).json({
+            message:"please verify your email before logging in "
+        })
+        return
+       }
+       if (!result.user) {
+            res.status(401).json({ message: "Invalid email or password" });
+            return;
         }
         
-        const passwordMatch = await argon2.verify(user.password, password)
-        if (!passwordMatch) {
-            res.status(401).json({
-                message: "Inavalid password"
-            })
-            return
-        }
-        const activeSession=await getActiveSession(user.id)
+        const activeSession=await getActiveSession(result.user.id)
         //if active session already exist
         if(activeSession){
             res.status(409).json({
@@ -97,66 +212,27 @@ export const login = async (req: Request, res: Response):Promise<void> => {
             });
             return
         }
-        
-        
-        const userAgent=req.headers["user-agent"] || "unknown" 
-        const deviceIp=req.ip || "unknown"
-
-        const deviceInfo=getDeviceInfo(userAgent,deviceIp)
-        const session=await createSession(user.id,deviceInfo.deviceId,deviceInfo.operatingSystem,deviceInfo.deviceName,deviceIp)
-        if (!session) {
-            res.status(500).json({
-                message: "Failed to create login session"
-            });
-
-            return;
-        }
-
-        const payload = {
-            id: user.id,
-            name:user.name,
-            email: user.email,
-            role: user.role,
-            sessionId:session.id
-        }
-        const accessToken = generateAccessToken(payload)
-        const refreshToken = generateRefreshToken(payload)
-
-
-        const refreshExpiresAt = new Date()
-        refreshExpiresAt.setDate(
-            refreshExpiresAt.getDate() + 7
-        )
-        await saveRefreshToken(user.id,session.id, refreshToken, refreshExpiresAt)
-        await saveSessionToRedis(session.id,user.id,session.expires_at)  
-        await saveUserToRedis({
-            id:user.id,
-            name:user.name,
-            email:user.email,
-            role:user.role
-        })      
-
+        const tokens=await createLoginResponse(req,result.user)
         res.status(200).json({
-            "status": "success",
-            "success": true,
-            "message": "Account details retrieved successfully.",
-            "data": {
-                id: user.id,
-                name: user.name,
-                email: user.email,
-                role: user.role
+            status: "success",
+            success: true,
+            message: "Login successful",
+            data: {
+                id: result.user.id,
+                name: result.user.name,
+                email: result.user.email,
+                role: result.user.role,
+                email_verified: result.user.email_verified
             },
-            "accessToken": accessToken,
-            "refreshToken": refreshToken,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
             session: {
-                id: session.id,
-                loginTimestamp:session.login_timestamp,
-                expiresAt:session.expires_at,
-                status:session.status
-
+                id: tokens.session.id,
+                loginTimestamp: tokens.session.login_timestamp,
+                expiresAt: tokens.session.expires_at,
+                status: tokens.session.status
             }
-        })
-
+        });
 
     }
     catch (err) {
@@ -173,78 +249,50 @@ export const login = async (req: Request, res: Response):Promise<void> => {
 
 export const forceLogin=async(req:Request,res:Response):Promise<void>=>{
     try{
-        const {email,password}=req.body
-        const user=await getUserByEmail(email)
-        if(!user){
-            res.status(401).json({
-                message:"Invalid email or Password"
-            })
-            return
+        const email = normalizeEmail(req.body.email);
+        const password = req.body.password as string;
+        const result = await checkCredentials(email, password);
+
+        if (result.error === "unverified") {
+            res.status(403).json({ message: "Please verify your email before logging in" });
+            return;
         }
-        const passwordMatch=await argon2.verify(user.password,password)
-        if(!passwordMatch){
-            res.status(401).json({
-                message:"Invalid password"
-            })
-            return
+        if (!result.user) {
+            res.status(401).json({ message: "Invalid email or password" });
+            return;
         }
-        const activeSession=await getActiveSession(user.id)
+            
+        const activeSession=await getActiveSession(result.user.id)
         if(activeSession){
             await closeSessionById(activeSession.id)
+            await deleteSessionFronRedis(activeSession.id)
             const oldRefreshToken=await getRefreshTokenBySessionId(activeSession.id)
             if(oldRefreshToken){
                 await deleteRefreshToken(oldRefreshToken.token)
             }
+            
         }
-        const userAgent=req.headers["user-agent"] || "unknown"
-        const deviceIp=req.ip || "unknown"
-        const deviceInfo=await getDeviceInfo(userAgent,deviceIp)
-        const newSession=await createSession(user.id,deviceInfo.deviceId,deviceInfo.operatingSystem,deviceInfo.deviceName,deviceIp)
-        if (!newSession) {
-            res.status(500).json({
-                message: "Failed to create login session"
-            });
-            return;
-        }
-        const payLoad={
-            id:user.id,
-            name:user.name,
-            email:user.email,
-            role:user.role,
-            sessionId:newSession.id
-        }
-        const newAccessToken=await generateAccessToken(payLoad);
-        const newRefreshToken=await generateRefreshToken(payLoad)
-        const refreshExpiresAt = new Date()
-        refreshExpiresAt.setDate(
-            refreshExpiresAt.getDate() + 7
-        )
-        await saveRefreshToken(user.id,newSession.id, newRefreshToken, refreshExpiresAt)
-        await saveSessionToRedis(newSession.id,user.id,newSession.expires_at)
-        await saveUserToRedis({id:user.id,name:user.name,email:user.email,role:user.role})
+        const tokens = await createLoginResponse(req, result.user);
         res.status(200).json({
-            "status": "success",
-            "success": true,
-            "message": "Account details retrieved successfully.",
-            "data": {
-                id: user.id,
-                name: user.name,
-                email: user.email,
-                role: user.role
+            status: "success",
+            success: true,
+            message: "Login successful",
+            data: {
+                id: result.user.id,
+                name: result.user.name,
+                email: result.user.email,
+                role: result.user.role,
+                email_verified: result.user.email_verified
             },
-            "accessToken": newAccessToken,
-            "refreshToken": newRefreshToken,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
             session: {
-                id: newSession.id,
-                loginTimestamp:newSession.login_timestamp,
-                expiresAt:newSession.expires_at,
-                status:newSession.status
-
+                id: tokens.session.id,
+                loginTimestamp: tokens.session.login_timestamp,
+                expiresAt: tokens.session.expires_at,
+                status: tokens.session.status
             }
-        })
-       
-
-        
+        });        
     }
     catch(err){
         console.log(err)
@@ -259,32 +307,27 @@ export const forceLogin=async(req:Request,res:Response):Promise<void>=>{
 //REFRESH ACCESS TOKEN
 export const refreshToken = async (req: Request, res: Response):Promise<void> => {
     try {
-        const {refreshToken} = req.body//get from request body
-        if (!refreshToken) {
-            res.status(401).json({
-                message: "Refresh Token required"
-            })
-            return
+        const token=req.body.refreshToken as string
+        if (!token) {
+            res.status(401).json({ message: "Refresh token required" });
+            return;
         }
-        const decoded = verifyRefreshToken(refreshToken) 
-        console.log("Decoded resfresh token",decoded)
-        const storedToken=await getRefreshToken(refreshToken)
-        console.log(storedToken)
-
-
-        if(!storedToken){
-            res.status(401).json({
-                message:"Invalid or expired refresh Token"
-            })
-            return
+        const decoded = verifyRefreshToken(token);
+        const storedToken = await getRefreshToken(token);
+        if (!storedToken) {
+            res.status(401).json({ 
+                message: "Invalid or expired refresh token" 
+            });
+            return;
         }
 
-        if(storedToken.session_id!==decoded.sessionId){
-            res.status(401).json({
-                message:"Refresh token does not belong to this session"
-            })
-            return
+        if (storedToken.session_id !== decoded.sessionId) {
+            res.status(401).json({ 
+                message: "Refresh token does not belong to this session" 
+            });
+            return;
         }
+
         //get old session
         //check in redis session
         const redisSession=await getSessionFromRedis(decoded.sessionId)
@@ -316,8 +359,15 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
 
 
         const closedSession=await closeSessionById(oldSession.id)
+        if (!closedSession) {
+            res.status(401).json({
+                message: "Session could not be closed"
+            })
+            return
+        }
         await deleteSessionFronRedis(oldSession.id)
-        await deleteRefreshToken(refreshToken)
+        await deleteRefreshToken(token)
+
         const userAgent=req.headers["user-agent"] || "unknown"
         const deviceIp=req.ip || "unknown"
         const deviceInfo=getDeviceInfo(userAgent,deviceIp)
@@ -330,6 +380,12 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
             email:decoded.email,
             role:decoded.role,
             sessionId:newSession.id
+        }
+        if (!newSession) {
+            res.status(500).json({
+            message: "Failed to create new session"
+            });
+            return;
         }
         const newAccessToken=generateAccessToken(payload)
         const newRefreshToken=generateRefreshToken(payload)
@@ -356,10 +412,8 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
                 loginTimeStamp:newSession.login_timestamp,
                 expiresAt:newSession.expires_at,
                 status:newSession.status
-            }
-            
-        })
-        
+            }            
+        })     
         
     }
     catch(err){
@@ -372,8 +426,8 @@ export const refreshToken = async (req: Request, res: Response):Promise<void> =>
 }
 export const logout=async(req:Request,res:Response):Promise<void>=>{
     try{
-        const {refreshToken}=req.body//get from request body
-        if(!refreshToken){
+        const token=req.body.refreshToken as string        
+        if(!token){
             res.status(400).json({
                 message:"refresh token not found"
             })
@@ -382,7 +436,7 @@ export const logout=async(req:Request,res:Response):Promise<void>=>{
          // We use a separate query here because
         // even an expired refresh token should allow
         // us to find the session and close it.
-        const storedToken=await getRefreshTokenForLogout(refreshToken)
+        const storedToken=await getRefreshTokenForLogout(token)
         if(!storedToken){
             res.status(404).json({
                 message:"refresh token not found"
@@ -391,9 +445,7 @@ export const logout=async(req:Request,res:Response):Promise<void>=>{
         }
         const closedSession=await closeSessionById(storedToken.session_id)
         await deleteSessionFronRedis(storedToken.session_id)
-        if(refreshToken){
-            await deleteRefreshToken(refreshToken)
-        }
+        await deleteRefreshToken(token)       
         
         res.status(200).json({
                 "status": "success",  
@@ -432,7 +484,13 @@ export const getUsers = async (req: Request, res: Response):Promise<void> => {
 
         const result = await getAllUsers()
         for(const user of result){
-            await saveUserToRedis(user)
+            await saveUserToRedis(user as {
+                id:number;
+                name:string;
+                email:string;
+                role:string;
+                email_verified: boolean;
+            })
         }
        
         res.status(200).json(result)
@@ -448,13 +506,10 @@ export const getUsers = async (req: Request, res: Response):Promise<void> => {
 }
 export const getUserByID = async (req: Request, res: Response) => {
     try {
-        const { id } = req.params
-        const userId=Number(id)
-        if(isNaN(userId)){
-            res.status(400).json({
-                message:"Invalid user ID"
-            })
-            return
+        const userId = Number(req.params.id);
+        if (!Number.isInteger(userId) || userId <= 0) {
+            res.status(400).json({ message: "Invalid user ID" });
+            return;
         }
         const redisUser=await getUserByIdFromRedis(userId)
         if(redisUser){
@@ -465,10 +520,18 @@ export const getUserByID = async (req: Request, res: Response) => {
 
         const result = await getUserById(userId)
         if (!result) {
-            res.status(404).json("user not found")
+            res.status(404).json({
+                message:"user not found"
+            })
             return
         }
-        await saveUserToRedis(result)
+        await saveUserToRedis(result as {
+            id:number;
+            name:string;
+            email:string;
+            role:string;
+            email_verified:boolean;
+        })
 
         res.status(200).json(result)
     }
@@ -492,40 +555,57 @@ export const updateUserById = async (req: Request, res: Response):Promise<void>=
             res.status(400).json("invalid user id");
             return;
         }
-         const { name, email, password, role } = req.body
-         if(!name || !email || !password || !role){
+         const { name, role } = req.body
+         const email=normalizeEmail(req.body.email)
+         if(!name || !email || !role){
             res.status(400).json({
                 message:"All field are required"
             })
-            return 
+            return
          }
-        const hashedPassword = await argon2.hash(password)
+         const existing=await getUserById(userId)
+         if(!existing){
+            res.status(404).json({
+                message:"user not found"
+            })
+            return
+         }
+         const emailChanged=existing.email.toLowerCase()!==email
+         const conflictingUser =emailChanged ? await getUserByEmail(email) : null
+         if(conflictingUser && conflictingUser.id !==userId){
+            res.status(409).json({
+                message:"Email is already used by another account"
+            })
+            return
+         }
         
         const user = await updateUser(
             userId,
             name,
             email,
-            hashedPassword,
             role
         )
         if (!user) {
             res.status(404).json("user not found")
             return
         }
+        if(emailChanged){
+            await queueVerificationEmail(user)
+        }
         try {
             await saveUserToRedis(user);
             console.log("User cache updated in Redis");
-        } 
+        }
         catch (redisError) {
             console.log("Redis cache update failed:", redisError);
         }
 
         res.status(200).json({
-                "status": "success",  
-                "success": true,  
-                "message": "user updated successfully.",  
-                "data": user
-                    })
+            message: emailChanged
+                ? "User updated. Verify the new email address before logging in."
+                : "User updated successfully",
+            data: user
+        });
     }
     catch (err) {
         console.log(err)
@@ -551,11 +631,11 @@ export const deleteUserById = async (req: Request, res: Response) => {
         }
         const result = await deleteUser(userId)
 
-        if (result) {
+        if (!result) {
             res.status(404).json("user not found");
             return;
         }
-        await deleteUserFromRedis(result)
+        await deleteUserFromRedis(result.id)
 
 
         res.status(200).json("user deleted successfully");
@@ -595,36 +675,46 @@ export const loginHistory=async(req:Request,res:Response):Promise<void>=>{
 
 export const forgotPassword=async(req:Request,res:Response):Promise<void>=>{
     try{
-        const {email}=req.body
-        const user=await getUserByEmail(email)
-        if(!user){
-            res.status.json({
-                message:"user not found"
-            })
-            return
+       const email = normalizeEmail(req.body.email)
+        const genericMessage ="If an account exists for this email, a password reset link will be sent.";
+        const user = await getUserByEmail(email);
+        if (!user) {
+            res.status(200).json({
+                message: genericMessage
+            });
+            return;
         }
-        //generate tmporary token
-        const resetToken=crypto.randomBytes(32).toString("hex")
-        //store ONLY temporary token in redis
-        //TTL=15 minutes
-        await savePasswordResetToken(user.id,resetToken)
+        const token=crypto.randomBytes(32).toString("hex")        
+        await savePasswordResetToken(user.id, token);
+
+        const baseUrl = process.env.PASSWORD_RESET_URL;
+        if (!baseUrl) {
+            throw new Error(
+                "PASSWORD_RESET_URL is not configured"
+            );
+        }
+        const url=`${baseUrl}?email=${encodeURIComponent(email)}&resetToken=${encodeURIComponent(token)}`
+        await addEmailJob({
+            type:"reset-password",
+            to:email,
+            name:user.name,
+            url
+        })
         res.status(200).json({
-            message:"password reset token generated",
-            "resetToken": resetToken
-        })
+            message: genericMessage
+        });
+    } catch (error) {
+        console.error("Forgot password error:", error);
 
-    }
-    catch(err){
-        console.log(err)
         res.status(500).json({
-            message:"something went wrong"
-        })
+            message: "Unable to process the password reset request"
+        });
     }
-}
-
+};
 export const resetPassword=async(req:Request,res:Response):Promise<void>=>{
     try{
-        const {email,resetToken,newPassword} =req.body
+        const email=normalizeEmail(req.body.email)
+        const {resetToken,newPassword}=req.body
         const user=await getUserByEmail(email)
         if(!user){
             res.status(400).json({
@@ -648,14 +738,18 @@ export const resetPassword=async(req:Request,res:Response):Promise<void>=>{
         }
         const hashedPassword=await argon2.hash(newPassword)
         const updatedUser=await updateUserPassword(user.id,hashedPassword)
-        if(!updateUser){
+        if(!updatedUser){
             res.status(404).json({
                 message:"user not found"
             })
             return
         }
         await deletePasswordResetToken(user.id)
-        await saveUserToRedis(updatedUser)
+        try {
+            await saveUserToRedis(updatedUser);
+        } catch (redisError) {
+            console.error("Redis cache update failed:", redisError);
+        }
 
         res.status(200).json({
             message:"password reset successfully"
@@ -673,20 +767,21 @@ export const resetPassword=async(req:Request,res:Response):Promise<void>=>{
 export const updatedPassword=async(req:Request,res:Response):Promise<void>=>{
     try{
         const userId=req.user?.id
-        if(!userId){
+        if(!userId || !req.user){
             res.status(401).json({
                 message:"unauthorized"
             })
             return
         }
         const {currentPassword,newPassword}=req.body
-        const user=await getUserByEmail(req.user!.email)
+        const user=await getUserByEmail(req.user!.email) 
         if(!user){
             res.status(404).json({
                 message:"user not found"
             })
             return 
         }
+        
         const passwordMatch=await argon2.verify(user.password,currentPassword)
         if(!passwordMatch){
             res.status(401).json({
@@ -695,7 +790,6 @@ export const updatedPassword=async(req:Request,res:Response):Promise<void>=>{
             return 
         }
         const hashedPassword=await argon2.hash(newPassword)
-
         const updatedUser=await updateUserPassword(userId,hashedPassword)
         if(!updatedUser){
             res.status(404).json({
@@ -705,7 +799,12 @@ export const updatedPassword=async(req:Request,res:Response):Promise<void>=>{
         }
          // Redis only gets safe fields
         // No password is stored
-        await saveUserToRedis(updatedUser)
+        try {
+            await saveUserToRedis(updatedUser);
+        }
+        catch (redisError){
+            console.error("Redis cache update failed:", redisError);
+        }
         res.status(200).json({
             message:"Password updated successefully"
         })
@@ -718,3 +817,4 @@ export const updatedPassword=async(req:Request,res:Response):Promise<void>=>{
         });
     }
 }
+
