@@ -53,7 +53,10 @@ User.init(
         sequelize,
         timestamps:false,
         modelName:"User",
-        tableName:"usertable"
+        tableName:"usertable",
+        paranoid: true,
+        deletedAt: 'destroyedAt',
+        
     }
 
 )
@@ -72,13 +75,21 @@ export const createUser=async(
     role:string,
     
 )=>{
-    const user=await User.create({
-        name,
-        email,
-        password,
-        role
-    })
-    return safeUser(user)
+    const t=await sequelize.transaction();
+    try{
+        const user=await User.create({
+            name,
+            email,
+            password,
+            role
+        },{transaction:t})
+        await t.commit();
+        return safeUser(user)
+    }
+    catch(error){
+        await t.rollback();
+        throw error
+    }
 }
 
 export const getAllUsers=async()=>{
@@ -133,7 +144,11 @@ export const deleteUser=async(id:number)=>{
         return null
     }
     const result=safeUser(user)
-    await user.destroy()
+    await user.destroy(
+        {
+            force:true,
+        }
+    )
     return result
 }
 export const markEmailVerified=async(userId:number):Promise<boolean>=>{

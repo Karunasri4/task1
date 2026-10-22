@@ -78,6 +78,9 @@ LoginSession.init(
         timestamps:false,
         modelName:"LoginSession",
         tableName:"login_history",
+        paranoid:true,
+        deletedAt:'destroyedTimestamp',
+        
     }
 )
 
@@ -148,4 +151,5 @@ export const getUserLoginHistory=async(userId:number)=>{
         raw:true
     })
 }
+export default LoginSession
 
